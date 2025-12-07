@@ -2,6 +2,7 @@ const github = require('@actions/github')
 const core = require('@actions/core')
 const _ = require('lodash')
 const cc = require('@conventional-commits/parser')
+require('cross-fetch/polyfill');
 
 const types = [
   { types: ['feat', 'feature'], header: 'New Features', icon: ':sparkles:' },
@@ -22,6 +23,8 @@ async function main () {
   const fromTag = core.getInput('fromTag')
   const toTag = core.getInput('toTag')
   const title = core.getInput('title')
+  const slackBotToken = core.getInput('slackBotToken')
+  const slackChannelIds = (core.getInput('slackChannelIds') || '').split(',').map(t => t.trim())
   const excludeTypes = (core.getInput('excludeTypes') || '').split(',').map(t => t.trim())
   const includeInvalidCommits = core.getBooleanInput('includeInvalidCommits')
   const reverseOrder = core.getBooleanInput('reverseOrder')
@@ -169,8 +172,6 @@ async function main () {
 
   // BUILD CHANGELOG
 
-  const changesFile = []
-  const changesVar = []
   const slackBlocks = []
 
   if (title != "") {
@@ -182,6 +183,9 @@ async function main () {
         "emoji": true
       }
     })
+    slackBlocks.push({
+      "type": "divider"
+    })
   }
 
   let idx = 0
@@ -191,67 +195,94 @@ async function main () {
       "type": "section",
 			"text": {
 				"type": "mrkdwn",
-				"text": ":boom: *BREAKING CHANGES*"
+				"text": ":boom: ===== *BREAKING CHANGES* ====="
 			}
     })
     
+    var msgLines = []
     for (const breakChange of breakingChanges) {
-      const text = breakChange.author ? `${breakChange.subject} *(by @${breakChange.author})*` : `${breakChange.subject}`
-      slackBlocks.push({
-        "type": "section",
-        "text": {
-          "type": "mrkdwn",
-          "text": text
-        }
-      })
-    }
-    idx++
-  }
-
-  for (const type of types) {
-    if (_.intersection(type.types, excludeTypes).length > 0) {
-      continue
-    }
-    const matchingCommits = commitsParsed.filter(c => type.types.includes(c.type))
-    if (matchingCommits.length < 1) {
-      continue
-    }
-    if (idx > 0) {
-      slackBlocks.push({
-        "type": "divider"
-      })
+      const text = breakChange.author ? `- ${breakChange.subject} *(by @${breakChange.author})*` : `- ${breakChange.subject}`
+      msgLines.push(text)
     }
 
     slackBlocks.push({
       "type": "section",
       "text": {
         "type": "mrkdwn",
-        "text": `${type.icon} *${type.header}*`
+        "text": msgLines.join("\n")
       }
     })
 
-    for (const commit of matchingCommits) {
-      const slackScope = commit.scope ? `*${commit.scope}*: ` : ''
-      const text = commit.author ? `${slackScope}${commit.subject} by ${commit.author} ${commit.sha.substring(0, 7)}` : `${slackScope}${commit.subject} ${commit.sha.substring(0, 7)}`
+    idx++
+  }
+
+  if (commitsParsed.length > 0) {
+    for (const type of types) {
+      if (_.intersection(type.types, excludeTypes).length > 0) {
+        continue
+      }
+      const matchingCommits = commitsParsed.filter(c => type.types.includes(c.type))
+      if (matchingCommits.length < 1) {
+        continue
+      }
+      if (idx > 0) {
+        slackBlocks.push({
+          "type": "divider"
+        })
+      }
+
       slackBlocks.push({
         "type": "section",
         "text": {
           "type": "mrkdwn",
-          "text": text
+          "text": `${type.icon} ===== *${type.header}* =====`
         }
       })
+
+      var msgLines = []
+      for (const commit of matchingCommits) {
+        const slackScope = commit.scope ? `*${commit.scope}*: ` : ''
+        const text = commit.author ? `- ${slackScope}${commit.subject} by ${commit.author} (${commit.sha.substring(0, 7)})` : `- ${slackScope}${commit.subject} (${commit.sha.substring(0, 7)})`
+        msgLines.push(text)
+      }
+
+      slackBlocks.push({
+        "type": "section",
+        "text": {
+          "type": "mrkdwn",
+          "text": msgLines.join("\n")
+        }
+      })
+
+      idx++
     }
-    idx++
   }
 
-  const payload = { 
-    'text': title,
-    'blocks': slackBlocks
+  if (slackBotToken.length > 0 && slackChannelIds.length > 0) {
+    await Promise.all(slackChannelIds.map(async (channelId) => {
+      const payload = { 
+        'channel':channelId,
+        'blocks': slackBlocks
+      }
+      core.info(`payload: ${JSON.stringify(payload)}`)
+      const res = await fetch('https://slack.com/api/chat.postMessage', {
+        method: "POST",
+        headers: { 
+          'Authorization': `Bearer ${slackBotToken}`,
+          "Content-Type": "application/json; charset=utf-8",
+         },
+        body: JSON.stringify(payload),
+      })
+      const resdata = await res.text()
+      if (res.status != 200) {
+        core.setFailed(resdata)
+      } else {
+        core.info(resdata)
+      }
+    }))
+  } else {
+    core.setOutput('payload', JSON.stringify({ 'blocks': slackBlocks }))
   }
-
-  core.info(`payload: ${JSON.stringify(payload)}`)
-
-  core.setOutput('payload', JSON.stringify(payload))
 }
 
 main()
